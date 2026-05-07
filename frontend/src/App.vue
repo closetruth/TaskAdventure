@@ -9,7 +9,6 @@ const tasks = ref([])
 const wallet = ref({ gold: 0, diamonds: 0 })
 const currentTaskId = ref(null)
 const currentTask = ref(null)
-const currentPoints = ref(0)
 const message = ref('')
 const newTaskTitle = ref('')
 
@@ -57,26 +56,18 @@ function formatInstant(iso) {
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString()
 }
 
-function recomputePointsFromTask(task) {
-  if (!task) return 0
-  // 原先使用分钟积分：Math.floor((task.elapsedSeconds ?? 0) / 60)
-  // 现在按需求去掉分钟积分，只使用创建随机分（createBonusPoints）作为“积分”基础
-  return task.createBonusPoints ?? 0
-}
-
 // Reward roll: implements documented probabilities
-function rewardRoll(points) {
+function rewardRoll() {
   // ~42% no reward
   if (Math.random() < 0.42) return { gold: 0, diamonds: 0 }
-  const maxGold = Math.min(200, Math.max(3, Math.floor(points * 3)))
-  const gold = Math.floor(Math.random() * (maxGold - 1 + 1)) + 1 // 1..maxGold
-  const diamonds = Math.random() < 0.18 ? 1 : 0
+  const gold = Math.floor(Math.random() * (50 - 5 + 1)) + 5 // 5..50 gold
+  const diamonds = Math.random() < 0.10 ? 1 : 0
   return { gold, diamonds }
 }
 
 function doRewardTick() {
   if (!currentTask.value || currentTask.value.status !== 'RUNNING') return
-  const roll = rewardRoll(currentPoints.value)
+  const roll = rewardRoll()
   if ((roll.gold || 0) > 0 || (roll.diamonds || 0) > 0) {
     const id = Date.now().toString() + '-' + Math.random().toString(36).slice(2, 6)
     const ev = {
@@ -147,10 +138,8 @@ function updateCurrentFromList() {
     task.elapsedSeconds = task.elapsedSeconds ?? 0
 
     currentTask.value = task
-    currentPoints.value = recomputePointsFromTask(task)
   } else {
     currentTask.value = null
-    currentPoints.value = 0
   }
 }
 
@@ -161,7 +150,6 @@ function selectTask(task) {
   task.accumulatedGold = task.accumulatedGold ?? 0
   task.accumulatedDiamonds = task.accumulatedDiamonds ?? 0
   currentTask.value = task
-  currentPoints.value = recomputePointsFromTask(task)
   message.value = `已选中任务 ${task.id} · ${task.title}`
   try {
     document.title = `Selected ${task.id}`
@@ -180,7 +168,6 @@ function startTimer() {
   timer = setInterval(() => {
     if (currentTask.value?.status === 'RUNNING') {
       currentTask.value.elapsedSeconds += 1
-      currentPoints.value = recomputePointsFromTask(currentTask.value)
 
       // Per requirement: according to the displayed seconds, every 10 seconds
       if (currentTask.value.elapsedSeconds > 0 && currentTask.value.elapsedSeconds % 10 === 0) {
@@ -220,11 +207,7 @@ async function loadTasks() {
 async function createTask() {
   const title = newTaskTitle.value.trim() || `任务 ${tasks.value.length + 1}`
   const task = await request(`/task?title=${encodeURIComponent(title)}`, { method: 'POST' })
-  let msg = `创建奖励：${task.createReward}（创建 ${task.createBonusPoints}）`
-  if (task.accumulatedGold > 0 || task.accumulatedDiamonds > 0) {
-    msg += `，初始掉落：🪙 +${task.accumulatedGold} 💎 +${task.accumulatedDiamonds}`
-  }
-  message.value = msg
+  message.value = `任务已创建`
   newTaskTitle.value = ''
   await loadTasks()
   selectTask(tasks.value.find(t => t.id === task.id) ?? task)
@@ -234,8 +217,7 @@ async function startSelectedTask() {
   if (!currentTaskId.value || !canStart.value) return
   const task = await request(`/task/${currentTaskId.value}/start`, { method: 'POST' })
   Object.assign(currentTask.value, task)
-  currentPoints.value = recomputePointsFromTask(currentTask.value)
-  message.value = `已开始：${task.title}（记录的开始时间 ${formatInstant(task.firstStartedAt)}）`
+  message.value = `已开始：${task.title}`
   startTimer()
   await loadTasks()
 }
@@ -244,8 +226,7 @@ async function pauseTask() {
   if (!currentTaskId.value || !canPause.value) return
   const task = await request(`/task/${currentTaskId.value}/pause`, { method: 'POST' })
   Object.assign(currentTask.value, task)
-  currentPoints.value = recomputePointsFromTask(currentTask.value)
-  message.value = `已暂停（最近暂停 ${formatInstant(task.lastPausedAt)}）`
+  message.value = `已暂停`
   stopTimer()
   await loadTasks()
 }
@@ -254,7 +235,6 @@ async function resumeTask() {
   if (!currentTaskId.value || !canResume.value) return
   const task = await request(`/task/${currentTaskId.value}/resume`, { method: 'POST' })
   Object.assign(currentTask.value, task)
-  currentPoints.value = recomputePointsFromTask(currentTask.value)
   message.value = '已继续'
   startTimer()
   await loadTasks()
@@ -264,13 +244,12 @@ async function finishTask() {
   if (!currentTaskId.value || !canFinish.value) return
   const task = await request(`/task/${currentTaskId.value}/finish`, { method: 'POST' })
   Object.assign(currentTask.value, task)
-  currentPoints.value = recomputePointsFromTask(currentTask.value)
   const loot =
     task.finishGoldAwarded > 0 || task.finishDiamondAwarded > 0
       ? `掉落：金币 +${task.finishGoldAwarded}，钻石 +${task.finishDiamondAwarded}`
       : '本次无金币/钻石掉落'
 
-  message.value = `${task.finishReward}\n${loot}\n完成时间：${formatInstant(task.completedAt)}`
+  message.value = `${loot}\n完成时间：${formatInstant(task.completedAt)}`
 
   stopTimer()
   await loadTasks()
@@ -468,12 +447,9 @@ onUnmounted(stopTimer)
         >
           <div class="title">{{ task.title }}</div>
           <div class="status">状态：{{ task.status }}</div>
-          <div class="reward">创建：{{ task.createReward }}</div>
-          <div class="reward">创建 +{{ task.createBonusPoints }} · 合计 <strong>{{ task.createBonusPoints }}</strong></div>
           <div class="pending">待领取：🪙 +{{ task.accumulatedGold ?? 0 }} · 💎 +{{ task.accumulatedDiamonds ?? 0 }}</div>
           <div class="times">
-            <div>开始：{{ formatInstant(task.firstStartedAt) }}</div>
-            <div>暂停：{{ formatInstant(task.lastPausedAt) }}</div>
+            <div>创建：{{ formatInstant(task.createdAt) }}</div>
           </div>
           <div class="hint">点击选中，在右侧开始 / 暂停 / 完成</div>
         </div>
@@ -491,12 +467,14 @@ onUnmounted(stopTimer)
           @keydown.enter.prevent="selectTask(task)"
         >
           <div class="title">{{ task.title }}</div>
-          <div class="reward">结算积分：创建 +{{ task.createBonusPoints }} · 合计 <strong>{{ task.points }}</strong></div>
           <div class="loot">
             掉落：金币 +{{ task.finishGoldAwarded }} · 钻石 +{{ task.finishDiamondAwarded }}
           </div>
-          <div class="times">完成：{{ formatInstant(task.completedAt) }}</div>
-          <div class="reward subtle">{{ task.finishReward }}</div>
+          <div class="times">
+            <div>创建：{{ formatInstant(task.createdAt) }}</div>
+            <div>完成：{{ formatInstant(task.completedAt) }}</div>
+            <div>总耗时：{{ formatDuration(task.elapsedSeconds) }}</div>
+          </div>
         </div>
       </div>
 
@@ -509,20 +487,15 @@ onUnmounted(stopTimer)
         <template v-else>
           <div>状态：{{ status }}</div>
           <div>任务：{{ currentTask.title }}</div>
-          <div class="breakdown">
-            创建 +{{ currentTask.createBonusPoints ?? 0 }} · 合计 <strong>{{ currentPoints }}</strong>
-          </div>
 
           <div class="pending selected-pending">待领取：🪙 +{{ currentTask.accumulatedGold ?? 0 }} · 💎 +{{ currentTask.accumulatedDiamonds ?? 0 }}</div>
-
-          <div class="energy">合计积分 {{ currentPoints }}</div>
 
           <div class="elapsed">运行时间 {{ formatDuration(currentTask.elapsedSeconds ?? 0) }}</div>
 
           <div class="bar">
             <div
               class="bar-inner"
-              :style="{ width: Math.min(currentPoints, 100) + '%' }"
+              :style="{ width: Math.min((currentTask.elapsedSeconds % 60) / 60 * 100, 100) + '%' }"
             ></div>
           </div>
 
@@ -541,27 +514,21 @@ onUnmounted(stopTimer)
         <p class="message" v-if="message">{{ message }}</p>
 
         <section class="rules" aria-labelledby="rules-heading">
-          <h2 id="rules-heading">📐 积分与奖励怎么算</h2>
-          <p class="rules-intro">与后端 <code>TaskService</code> 一致，便于你对照预期。</p>
+          <h2 id="rules-heading">📐 任务与奖励说明</h2>
           <ul>
-            <li>
-              <strong>创建随机分</strong>：新建任务时随机 <code>1～18</code>，固定写在该任务上；界面合计积分现在只使用创建分展示。
-            </li>
             <li>
               <strong>间歇掉落</strong>：选中并运行的任务每 <strong>10 秒</strong> 会进行一次掉落判定（客户端），如果命中会把掉落累积到该任务上（显示为 "待领取"）。
             </li>
             <li>
-              <strong>领取</strong>：只有在点击 <em>完成</em> 后，客户端累积的掉落才会真正加入钱包，并在任务结算中显示。
+              <strong>进度条</strong>：进度条每 <strong>60 秒</strong> 循环走完一圈。
             </li>
             <li>
-              <strong>完成时金币 / 钻石</strong>（每次点击完成掷一次）：
-              <ul>
-                <li>约 <strong>42%</strong> 概率：金币 0、钻石 0；</li>
-                <li>否则：金币在 <code>1</code> 到 <code>min(200, max(3, 累计积分 × 3))</code> 之间均匀随机（整数）；</li>
-                <li>在「有奖励」的这一支里，另有约 <strong>18%</strong> 概率额外 <strong>+1</strong> 钻石。</li>
-              </ul>
+              <strong>领取</strong>：只有在点击 <em>完成</em> 后，累积的掉落才会真正加入钱包。
             </li>
-            <li><strong>钱包</strong>：每次完成把本次掉落的金币、钻石累加到顶部余额。</li>
+            <li>
+              <strong>完成奖励</strong>：点击完成时，除了累积掉落，还会额外获得一份随机奖励（金币 5～50，10% 概率获得 1 钻石）。
+            </li>
+            <li><strong>记录</strong>：系统记录任务的创建时间、完成时间以及任务的总专注耗时。</li>
           </ul>
         </section>
       </div>

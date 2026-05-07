@@ -32,23 +32,15 @@ public class TaskEntity {
     private Instant runningSince;
 
     @Column(nullable = false)
-    private int createBonusPoints;
+    private Instant createdAt;
 
-    @Column(length = 128)
-    private String createRewardMessage;
+    private Instant completedAt;
 
     @Column(nullable = false)
     private int finishGoldAwarded;
 
     @Column(nullable = false)
     private int finishDiamondAwarded;
-
-    @Column(length = 512)
-    private String finishRewardSummary;
-
-    private Instant firstStartedAt;
-    private Instant lastPausedAt;
-    private Instant completedAt;
 
     // ... new persisted accumulators (client-side ticks will be stored here)
     @Column
@@ -60,12 +52,11 @@ public class TaskEntity {
     protected TaskEntity() {
     }
 
-    public TaskEntity(String title, int createBonusPoints, String createRewardMessage) {
+    public TaskEntity(String title) {
         this.title = title;
-        this.createBonusPoints = createBonusPoints;
-        this.createRewardMessage = createRewardMessage;
         this.status = TaskStatus.CREATED;
         this.elapsedSeconds = 0;
+        this.createdAt = Instant.now();
         this.finishGoldAwarded = 0;
         this.finishDiamondAwarded = 0;
         this.accumulatedGold = 0;
@@ -92,32 +83,8 @@ public class TaskEntity {
         return runningSince;
     }
 
-    public int getCreateBonusPoints() {
-        return createBonusPoints;
-    }
-
-    public String getCreateRewardMessage() {
-        return createRewardMessage;
-    }
-
-    public int getFinishGoldAwarded() {
-        return finishGoldAwarded;
-    }
-
-    public int getFinishDiamondAwarded() {
-        return finishDiamondAwarded;
-    }
-
-    public String getFinishRewardSummary() {
-        return finishRewardSummary;
-    }
-
-    public Instant getFirstStartedAt() {
-        return firstStartedAt;
-    }
-
-    public Instant getLastPausedAt() {
-        return lastPausedAt;
+    public Instant getCreatedAt() {
+        return createdAt;
     }
 
     public Instant getCompletedAt() {
@@ -152,9 +119,6 @@ public class TaskEntity {
         if (status != TaskStatus.CREATED && status != TaskStatus.PAUSED) {
             return;
         }
-        if (firstStartedAt == null) {
-            firstStartedAt = Instant.now();
-        }
         status = TaskStatus.RUNNING;
         runningSince = Instant.now();
     }
@@ -165,11 +129,10 @@ public class TaskEntity {
         }
         syncElapsedSeconds();
         status = TaskStatus.PAUSED;
-        lastPausedAt = Instant.now();
         runningSince = null;
     }
 
-    public void applyFinishRewards(String summary, int gold, int diamonds) {
+    public void applyFinishRewards(int gold, int diamonds) {
         if (status == TaskStatus.FINISHED) {
             return;
         }
@@ -179,7 +142,6 @@ public class TaskEntity {
         status = TaskStatus.FINISHED;
         runningSince = null;
         completedAt = Instant.now();
-        finishRewardSummary = summary;
         finishGoldAwarded = gold;
         finishDiamondAwarded = diamonds;
         // accumulated are expected to have been included by service; ensure cleared
@@ -194,17 +156,15 @@ public class TaskEntity {
         return elapsedSeconds + Math.max(delta, 0);
     }
 
-    // Per new requirement: minutes no longer contribute to points used for finish rolls
-    public long getMinutePoints() {
-        return 0L;
-    }
-
-    public long getTotalPoints() {
-        // Now only creation bonus counts as "points" for finish roll
-        return createBonusPoints;
-    }
-
     private void syncElapsedSeconds() {
         elapsedSeconds = getCurrentElapsedSeconds();
+    }
+
+    public int getFinishGoldAwarded() {
+        return finishGoldAwarded;
+    }
+
+    public int getFinishDiamondAwarded() {
+        return finishDiamondAwarded;
     }
 }
