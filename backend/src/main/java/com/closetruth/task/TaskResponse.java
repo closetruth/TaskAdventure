@@ -11,6 +11,8 @@ public record TaskResponse(
         int finishDiamondAwarded,
         int accumulatedGold,
         int accumulatedDiamonds,
+        int pendingGold,
+        int pendingDiamonds,
         Instant createdAt,
         Instant completedAt
 ) {
@@ -24,6 +26,8 @@ public record TaskResponse(
                 task.getFinishDiamondAwarded(),
                 task.getAccumulatedGold(),
                 task.getAccumulatedDiamonds(),
+                task.getPendingGold(),
+                task.getPendingDiamonds(),
                 task.getCreatedAt(),
                 task.getCompletedAt()
         );

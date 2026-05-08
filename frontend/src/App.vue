@@ -21,6 +21,14 @@ const acMsg = ref('')
 const acGame = ref(null)
 const selectedUnitId = ref(null)
 
+// Pet game state
+const pets = ref([])
+const petShop = ref(null)
+const petMsg = ref('')
+const newPetName = ref('')
+const newPetType = ref('cat')
+const selectedPetId = ref(null)
+
 let timer = null
 
 const status = computed(() => currentTask.value?.status ?? 'IDLE')
@@ -45,8 +53,51 @@ const canStart = computed(
 )
 const canPause = computed(() => currentTask.value?.status === 'RUNNING')
 const canResume = computed(() => currentTask.value?.status === 'PAUSED')
-const canFinish = computed(() => currentTask.value && currentTask.value.status !== 'FINISHED')
+const canFinish = computed(() => {
+  if (!currentTask.value || currentTask.value.status === 'FINISHED') return false
+  
+  // If planned time is set, check if elapsed time >= planned time
+  if (currentTask.value.plannedMinutes && currentTask.value.plannedMinutes > 0) {
+    const elapsedMinutes = Math.floor((currentTask.value.elapsedSeconds ?? 0) / 60)
+    return elapsedMinutes >= currentTask.value.plannedMinutes
+  }
+  
+  return true
+})
+const finishDisabledReason = computed(() => {
+  if (!currentTask.value || currentTask.value.status === 'FINISHED') return null
+  
+  if (currentTask.value.plannedMinutes && currentTask.value.plannedMinutes > 0) {
+    const elapsedMinutes = Math.floor((currentTask.value.elapsedSeconds ?? 0) / 60)
+    if (elapsedMinutes < currentTask.value.plannedMinutes) {
+      const remaining = currentTask.value.plannedMinutes - elapsedMinutes
+      return `还需专注 ${remaining} 分钟`
+    }
+  }
+  
+  return null
+})
 const isFinishedSelected = computed(() => currentTask.value?.status === 'FINISHED')
+const canClaim = computed(() => {
+  return currentTask.value && 
+         currentTask.value.status !== 'FINISHED' && 
+         ((currentTask.value.pendingGold ?? 0) > 0 || (currentTask.value.pendingDiamonds ?? 0) > 0)
+})
+const canDelete = computed(() => {
+  return currentTask.value && currentTask.value.status !== 'RUNNING'
+})
+
+const plannedMinutesInput = ref('')
+const remainingSeconds = computed(() => {
+  if (!currentTask.value || !currentTask.value.plannedMinutes) return null
+  const plannedSeconds = currentTask.value.plannedMinutes * 60
+  const elapsed = currentTask.value.elapsedSeconds ?? 0
+  const remaining = plannedSeconds - elapsed
+  return Math.max(0, remaining)
+})
+const hasPlannedTime = computed(() => {
+  return currentTask.value && currentTask.value.plannedMinutes && currentTask.value.plannedMinutes > 0
+})
 
 const selectedId = computed(() => currentTaskId.value)
 
@@ -81,8 +132,8 @@ function doRewardTick() {
     rewardEvents.value.unshift(ev)
     if (rewardEvents.value.length > 6) rewardEvents.value.pop()
 
-    // send accumulation to backend and update task state from response
-    request(`/task/${currentTaskId.value}/tick?gold=${roll.gold || 0}&diamonds=${roll.diamonds || 0}`, { method: 'POST' })
+    // send accumulation to backend as pending rewards (10-minute cycle)
+    request(`/task/${currentTaskId.value}/add-pending?gold=${roll.gold || 0}&diamonds=${roll.diamonds || 0}`, { method: 'POST' })
       .then(data => {
         // update task in tasks list and currentTask
         const idx = tasks.value.findIndex(t => t.id === data.id)
@@ -93,14 +144,14 @@ function doRewardTick() {
         if (currentTaskId.value === data.id) {
           currentTask.value = tasks.value[idx] ?? data
           // ensure accumulators exist
-          currentTask.value.accumulatedGold = currentTask.value.accumulatedGold ?? 0
-          currentTask.value.accumulatedDiamonds = currentTask.value.accumulatedDiamonds ?? 0
+          currentTask.value.pendingGold = currentTask.value.pendingGold ?? 0
+          currentTask.value.pendingDiamonds = currentTask.value.pendingDiamonds ?? 0
         }
       })
       .catch(err => {
         // keep local accumulator as fallback if POST fails
-        currentTask.value.accumulatedGold = (currentTask.value.accumulatedGold || 0) + (roll.gold || 0)
-        currentTask.value.accumulatedDiamonds = (currentTask.value.accumulatedDiamonds || 0) + (roll.diamonds || 0)
+        currentTask.value.pendingGold = (currentTask.value.pendingGold || 0) + (roll.gold || 0)
+        currentTask.value.pendingDiamonds = (currentTask.value.pendingDiamonds || 0) + (roll.diamonds || 0)
       })
 
     // 仍保留弹窗提示，但不修改 wallet
@@ -135,6 +186,8 @@ function updateCurrentFromList() {
     // ensure client-only accumulator fields exist
     task.accumulatedGold = task.accumulatedGold ?? 0
     task.accumulatedDiamonds = task.accumulatedDiamonds ?? 0
+    task.pendingGold = task.pendingGold ?? 0
+    task.pendingDiamonds = task.pendingDiamonds ?? 0
     task.elapsedSeconds = task.elapsedSeconds ?? 0
 
     currentTask.value = task
@@ -149,6 +202,8 @@ function selectTask(task) {
   // ensure accumulators exist
   task.accumulatedGold = task.accumulatedGold ?? 0
   task.accumulatedDiamonds = task.accumulatedDiamonds ?? 0
+  task.pendingGold = task.pendingGold ?? 0
+  task.pendingDiamonds = task.pendingDiamonds ?? 0
   currentTask.value = task
   message.value = `已选中任务 ${task.id} · ${task.title}`
   try {
@@ -169,8 +224,13 @@ function startTimer() {
     if (currentTask.value?.status === 'RUNNING') {
       currentTask.value.elapsedSeconds += 1
 
-      // Per requirement: according to the displayed seconds, every 10 seconds
-      if (currentTask.value.elapsedSeconds > 0 && currentTask.value.elapsedSeconds % 10 === 0) {
+      // Check auto-pause every second
+      if (hasPlannedTime.value && remainingSeconds.value === 0) {
+        checkAutoPause()
+      }
+
+      // Per requirement: according to the displayed seconds, every 10 minutes (600 seconds)
+      if (currentTask.value.elapsedSeconds > 0 && currentTask.value.elapsedSeconds % 600 === 0) {
         doRewardTick()
       }
     }
@@ -194,6 +254,8 @@ async function loadTasks() {
   for (const t of tasks.value) {
     t.accumulatedGold = t.accumulatedGold ?? 0
     t.accumulatedDiamonds = t.accumulatedDiamonds ?? 0
+    t.pendingGold = t.pendingGold ?? 0
+    t.pendingDiamonds = t.pendingDiamonds ?? 0
     t.elapsedSeconds = t.elapsedSeconds ?? 0
   }
   updateCurrentFromList()
@@ -241,20 +303,86 @@ async function resumeTask() {
 }
 
 async function finishTask() {
-  if (!currentTaskId.value || !canFinish.value) return
-  const task = await request(`/task/${currentTaskId.value}/finish`, { method: 'POST' })
+  if (!currentTaskId.value || !canFinish.value) {
+    if (finishDisabledReason.value) {
+      message.value = `⚠️ ${finishDisabledReason.value}，无法完成任务`
+    }
+    return
+  }
+  
+  try {
+    const task = await request(`/task/${currentTaskId.value}/finish`, { method: 'POST' })
+    Object.assign(currentTask.value, task)
+    const loot =
+      task.finishGoldAwarded > 0 || task.finishDiamondAwarded > 0
+        ? `掉落：金币 +${task.finishGoldAwarded}，钻石 +${task.finishDiamondAwarded}`
+        : '本次无金币/钻石掉落'
+
+    message.value = `${loot}\n完成时间：${formatInstant(task.completedAt)}`
+
+    stopTimer()
+    await loadTasks()
+    await loadWallet()
+  } catch (err) {
+    message.value = `完成失败：${err.message}`
+  }
+}
+
+async function claimRewards() {
+  if (!currentTaskId.value || !canClaim.value) return
+  const task = await request(`/task/${currentTaskId.value}/claim`, { method: 'POST' })
   Object.assign(currentTask.value, task)
-  const loot =
-    task.finishGoldAwarded > 0 || task.finishDiamondAwarded > 0
-      ? `掉落：金币 +${task.finishGoldAwarded}，钻石 +${task.finishDiamondAwarded}`
-      : '本次无金币/钻石掉落'
-
-  message.value = `${loot}\n完成时间：${formatInstant(task.completedAt)}`
-
-  stopTimer()
+  message.value = `已领取奖励：🪙 +${task.pendingGold ?? 0} · 💎 +${task.pendingDiamonds ?? 0}`
   await loadTasks()
-
   await loadWallet()
+}
+
+async function deleteTask() {
+  if (!currentTaskId.value || !canDelete.value) return
+  if (!confirm('确定要删除这个任务吗？')) return
+  
+  try {
+    const result = await request(`/task/${currentTaskId.value}/delete`, { method: 'POST' })
+    message.value = result.message || '任务已删除'
+    currentTaskId.value = null
+    currentTask.value = null
+    await loadTasks()
+  } catch (err) {
+    message.value = `删除失败：${err.message}`
+  }
+}
+
+async function setPlannedTime() {
+  if (!currentTaskId.value) return
+  const minutes = parseInt(plannedMinutesInput.value)
+  if (!minutes || minutes < 5) {
+    message.value = '计划时间最少为5分钟'
+    return
+  }
+  
+  try {
+    const task = await request(`/task/${currentTaskId.value}/plan?minutes=${minutes}`, { method: 'POST' })
+    Object.assign(currentTask.value, task)
+    message.value = `已设置计划时间：${minutes} 分钟`
+    plannedMinutesInput.value = ''
+    await loadTasks()
+  } catch (err) {
+    message.value = `设置失败：${err.message}`
+  }
+}
+
+async function checkAutoPause() {
+  if (!currentTaskId.value) return
+  try {
+    const task = await request(`/task/${currentTaskId.value}/check-auto-pause`, { method: 'POST' })
+    if (task.status === 'PAUSED') {
+      message.value = '⏰ 计划时间已到，任务已自动暂停！'
+      stopTimer()
+      await loadTasks()
+    }
+  } catch (err) {
+    console.error('Auto-pause check failed:', err)
+  }
 }
 
 async function loadWeekSummary() {
@@ -349,6 +477,105 @@ async function acMerge(unitId) {
   await acPost('/autochess/unit/merge', { unitId })
 }
 
+// Pet game functions
+async function loadPets() {
+  pets.value = await request('/pets')
+}
+
+async function loadPetShop() {
+  petShop.value = await request('/pets/shop')
+}
+
+async function adoptPet() {
+  if (!newPetName.value.trim()) {
+    petMsg.value = '请输入宠物名字'
+    return
+  }
+  try {
+    const pet = await request(`/pets/adopt?name=${encodeURIComponent(newPetName.value)}&type=${newPetType.value}`, { method: 'POST' })
+    petMsg.value = `成功领养了 ${pet.name}！`
+    newPetName.value = ''
+    await loadPets()
+    await loadWallet()
+  } catch (err) {
+    petMsg.value = `领养失败：${err.message}`
+  }
+}
+
+async function feedPet(petId) {
+  try {
+    const pet = await request(`/pets/${petId}/feed`, { method: 'POST' })
+    petMsg.value = `${pet.name} 吃饱了！`
+    await loadPets()
+    await loadWallet()
+  } catch (err) {
+    petMsg.value = `喂食失败：${err.message}`
+  }
+}
+
+async function playWithPet(petId) {
+  try {
+    const pet = await request(`/pets/${petId}/play`, { method: 'POST' })
+    petMsg.value = `${pet.name} 玩得很开心！`
+    await loadPets()
+  } catch (err) {
+    petMsg.value = `玩耍失败：${err.message}`
+  }
+}
+
+async function trainPet(petId) {
+  try {
+    const pet = await request(`/pets/${petId}/train`, { method: 'POST' })
+    petMsg.value = `${pet.name} 训练完成，获得了经验！`
+    await loadPets()
+  } catch (err) {
+    petMsg.value = `训练失败：${err.message}`
+  }
+}
+
+async function restPet(petId) {
+  try {
+    const pet = await request(`/pets/${petId}/rest`, { method: 'POST' })
+    petMsg.value = `${pet.name} 休息了一会儿`
+    await loadPets()
+  } catch (err) {
+    petMsg.value = `休息失败：${err.message}`
+  }
+}
+
+async function deletePet(petId) {
+  if (!confirm('确定要送走这只宠物吗？')) return
+  try {
+    await request(`/pets/${petId}/delete`, { method: 'POST' })
+    petMsg.value = '宠物已送走'
+    await loadPets()
+  } catch (err) {
+    petMsg.value = `操作失败：${err.message}`
+  }
+}
+
+function getPetEmoji(type) {
+  const emojis = {
+    cat: '🐱',
+    dog: '🐶',
+    rabbit: '🐰',
+    dragon: '🐉',
+    fox: '🦊',
+    panda: '🐼'
+  }
+  return emojis[type] || '🐾'
+}
+
+function getStatusEmoji(status) {
+  const emojis = {
+    happy: '😊',
+    hungry: '😢',
+    tired: '😴',
+    sad: '😭'
+  }
+  return emojis[status] || '🙂'
+}
+
 function starLabel(n) {
   const s = Number(n) || 1
   return '★'.repeat(Math.min(3, Math.max(1, s)))
@@ -394,6 +621,9 @@ watch(tab, async value => {
   if (value === 'autochess') {
     await loadAcGame()
   }
+  if (value === 'pets') {
+    await Promise.all([loadPets(), loadPetShop()])
+  }
 })
 
 onMounted(async () => {
@@ -415,6 +645,9 @@ onUnmounted(stopTimer)
     <nav class="tabs" aria-label="主功能">
       <button type="button" class="tab" :class="{ active: tab === 'tasks' }" @click="tab = 'tasks'">
         任务
+      </button>
+      <button type="button" class="tab" :class="{ active: tab === 'pets' }" @click="tab = 'pets'">
+        🐾 宠物养成
       </button>
       <button type="button" class="tab" :class="{ active: tab === 'autochess' }" @click="tab = 'autochess'">
         迷你自走棋
@@ -447,7 +680,10 @@ onUnmounted(stopTimer)
         >
           <div class="title">{{ task.title }}</div>
           <div class="status">状态：{{ task.status }}</div>
-          <div class="pending">待领取：🪙 +{{ task.accumulatedGold ?? 0 }} · 💎 +{{ task.accumulatedDiamonds ?? 0 }}</div>
+          <div class="pending">待领取：🪙 +{{ task.pendingGold ?? 0 }} · 💎 +{{ task.pendingDiamonds ?? 0 }}</div>
+          <div v-if="task.plannedMinutes" class="planned-badge">
+            ⏰ 计划：{{ task.plannedMinutes }} 分钟
+          </div>
           <div class="times">
             <div>创建：{{ formatInstant(task.createdAt) }}</div>
           </div>
@@ -488,14 +724,34 @@ onUnmounted(stopTimer)
           <div>状态：{{ status }}</div>
           <div>任务：{{ currentTask.title }}</div>
 
-          <div class="pending selected-pending">待领取：🪙 +{{ currentTask.accumulatedGold ?? 0 }} · 💎 +{{ currentTask.accumulatedDiamonds ?? 0 }}</div>
+          <div class="pending selected-pending">待领取：🪙 +{{ currentTask.pendingGold ?? 0 }} · 💎 +{{ currentTask.pendingDiamonds ?? 0 }}</div>
 
           <div class="elapsed">运行时间 {{ formatDuration(currentTask.elapsedSeconds ?? 0) }}</div>
+
+          <!-- Planned time display -->
+          <div v-if="hasPlannedTime" class="planned-time">
+            <div>⏰ 计划时间：{{ currentTask.plannedMinutes }} 分钟</div>
+            <div v-if="remainingSeconds !== null && currentTask.status === 'RUNNING'" class="countdown">
+              剩余时间：{{ formatDuration(remainingSeconds) }}
+            </div>
+          </div>
+
+          <!-- Set planned time form -->
+          <div v-if="!isFinishedSelected" class="plan-form">
+            <input 
+              v-model="plannedMinutesInput" 
+              type="number" 
+              placeholder="最少5分钟" 
+              min="5"
+              style="max-width: 120px"
+            />
+            <button type="button" @click="setPlannedTime">设置计划时间</button>
+          </div>
 
           <div class="bar">
             <div
               class="bar-inner"
-              :style="{ width: Math.min((currentTask.elapsedSeconds % 60) / 60 * 100, 100) + '%' }"
+              :style="{ width: Math.min((currentTask.elapsedSeconds % 600) / 600 * 100, 100) + '%' }"
             ></div>
           </div>
 
@@ -505,7 +761,18 @@ onUnmounted(stopTimer)
             <button type="button" :disabled="!canStart" @click="startSelectedTask">▶ 开始</button>
             <button type="button" :disabled="!canPause" @click="pauseTask">⏸ 暂停</button>
             <button type="button" :disabled="!canResume" @click="resumeTask">▶ 继续</button>
-            <button type="button" :disabled="!canFinish" @click="finishTask">✔ 完成</button>
+            <button type="button" :disabled="!canClaim" @click="claimRewards">💰 领取奖励</button>
+            <button 
+              type="button" 
+              :disabled="!canFinish" 
+              @click="finishTask"
+              :title="finishDisabledReason || ''"
+            >✔ 完成</button>
+            <button type="button" :disabled="!canDelete" @click="deleteTask" style="background: #3a1a1a; border-color: #ff6b6b;">🗑 删除任务</button>
+          </div>
+
+          <div v-if="finishDisabledReason" class="finish-warning">
+            ⚠️ {{ finishDisabledReason }}
           </div>
 
           <TaskTicker v-if="rewardEvents.length" :events="rewardEvents" />
@@ -517,22 +784,124 @@ onUnmounted(stopTimer)
           <h2 id="rules-heading">📐 任务与奖励说明</h2>
           <ul>
             <li>
-              <strong>间歇掉落</strong>：选中并运行的任务每 <strong>10 秒</strong> 会进行一次掉落判定（客户端），如果命中会把掉落累积到该任务上（显示为 "待领取"）。
+              <strong>间歇掉落</strong>：选中并运行的任务每 <strong>10 分钟</strong> 会进行一次掉落判定（客户端），如果命中会把掉落累积到该任务的“待领取”中。
             </li>
             <li>
-              <strong>进度条</strong>：进度条每 <strong>60 秒</strong> 循环走完一圈。
+              <strong>进度条</strong>：进度条每 <strong>10 分钟</strong> 循环走完一圈，表示下一个奖励周期。
             </li>
             <li>
-              <strong>领取</strong>：只有在点击 <em>完成</em> 后，累积的掉落才会真正加入钱包。
+              <strong>手动领取</strong>：点击“领取奖励”按钮可以将“待领取”的金币和钻石立即加入钱包。
             </li>
             <li>
-              <strong>完成奖励</strong>：点击完成时，除了累积掉落，还会额外获得一份随机奖励（金币 5～50，10% 概率获得 1 钻石）。
+              <strong>计划时间</strong>：可以设置任务的计划时间，到达时间后会自动暂停。<strong>必须完成计划时间后才能完成任务</strong>，完成计划时间会获得 <strong>50% 额外奖励</strong>！
+            </li>
+            <li>
+              <strong>完成奖励</strong>：点击完成时，除了待领取和累积的掉落，还会额外获得一份基于专注时长的大额奖励（时间越长奖励越多）。
+            </li>
+            <li>
+              <strong>删除任务</strong>：未完成的任务可以删除（运行中的任务需先暂停）。
             </li>
             <li><strong>记录</strong>：系统记录任务的创建时间、完成时间以及任务的总专注耗时。</li>
           </ul>
         </section>
       </div>
     </div>
+
+    <section v-show="tab === 'pets'" class="pet-root" aria-label="宠物养成">
+      <div class="pet-intro">
+        <h2>🐾 宠物养成</h2>
+        <p class="game-lead">
+          领养你的专属宠物，通过喂食、玩耍和训练来培养它们。宠物会随时间成长升级，保持它们的快乐和饱食度！
+        </p>
+      </div>
+
+      <!-- Pet Shop -->
+      <div v-if="petShop" class="pet-shop-block">
+        <h3 class="pet-h3">🏪 宠物商店</h3>
+        <div class="pet-shop-form">
+          <input v-model="newPetName" placeholder="输入宠物名字" style="max-width: 200px" />
+          <select v-model="newPetType" style="background: #1a1a1a; color: #fff; border: 1px solid #444; padding: 8px; border-radius: 4px">
+            <option v-for="type in petShop.types" :key="type" :value="type">
+              {{ getPetEmoji(type) }} {{ type }} - {{ petShop.pets[type] }} 金币
+            </option>
+          </select>
+          <button type="button" @click="adoptPet">领养宠物</button>
+        </div>
+      </div>
+
+      <!-- Pets List -->
+      <div class="pets-list">
+        <h3 class="pet-h3">我的宠物 ({{ pets.length }})</h3>
+        <p v-if="pets.length === 0" class="empty">还没有宠物，去商店领养一只吧！</p>
+        
+        <div v-for="pet in pets" :key="pet.id" class="pet-card">
+          <div class="pet-header">
+            <span class="pet-emoji">{{ getPetEmoji(pet.type) }}</span>
+            <div class="pet-info">
+              <div class="pet-name">{{ pet.name }} <span class="pet-level">Lv.{{ pet.level }}</span></div>
+              <div class="pet-status">{{ getStatusEmoji(pet.status) }} {{ pet.status }}</div>
+            </div>
+          </div>
+
+          <!-- Stats Bars -->
+          <div class="pet-stats">
+            <div class="stat-row">
+              <span class="stat-label">❤️ 快乐</span>
+              <div class="stat-bar">
+                <div class="stat-fill happiness" :style="{ width: pet.happiness + '%' }"></div>
+              </div>
+              <span class="stat-value">{{ pet.happiness }}%</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label">🍖 饱食</span>
+              <div class="stat-bar">
+                <div class="stat-fill hunger" :style="{ width: pet.hunger + '%' }"></div>
+              </div>
+              <span class="stat-value">{{ pet.hunger }}%</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label">⚡ 体力</span>
+              <div class="stat-bar">
+                <div class="stat-fill energy" :style="{ width: pet.energy + '%' }"></div>
+              </div>
+              <span class="stat-value">{{ pet.energy }}%</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label">⭐ 经验</span>
+              <div class="stat-bar">
+                <div class="stat-fill exp" :style="{ width: (pet.expProgress * 100) + '%' }"></div>
+              </div>
+              <span class="stat-value">{{ pet.experience }}/{{ pet.expToNextLevel }}</span>
+            </div>
+          </div>
+
+          <!-- Actions -->
+          <div class="pet-actions">
+            <button type="button" @click="feedPet(pet.id)" :disabled="wallet.gold < 5">🍖 喂食 (-5金)</button>
+            <button type="button" @click="playWithPet(pet.id)">🎾 玩耍</button>
+            <button type="button" @click="trainPet(pet.id)">💪 训练</button>
+            <button type="button" @click="restPet(pet.id)">😴 休息</button>
+            <button type="button" @click="deletePet(pet.id)" class="btn-danger">🗑 送走</button>
+          </div>
+        </div>
+      </div>
+
+      <p v-if="petMsg" class="game-msg">{{ petMsg }}</p>
+
+      <!-- Game Rules -->
+      <section class="rules" aria-labelledby="pet-rules-heading">
+        <h2 id="pet-rules-heading">📖 宠物游戏规则</h2>
+        <ul>
+          <li><strong>领养宠物</strong>：使用金币从商店领养不同种类的宠物。</li>
+          <li><strong>喂食</strong>：花费 5 金币喂食，增加饱食度和少量快乐值。</li>
+          <li><strong>玩耍</strong>：与宠物玩耍，大幅增加快乐值并获得经验（需要体力和饱食度）。</li>
+          <li><strong>训练</strong>：训练宠物获得大量经验，但会降低快乐值（需要更多体力和饱食度）。</li>
+          <li><strong>休息</strong>：让宠物休息恢复体力。</li>
+          <li><strong>升级</strong>：积累经验升级，升级后恢复满体力并增加快乐值。</li>
+          <li><strong>状态变化</strong>：长时间不照顾宠物，它会变饿、变累或不开心。</li>
+        </ul>
+      </section>
+    </section>
 
     <section v-show="tab === 'autochess'" class="ac-root" aria-label="迷你自走棋">
       <div class="ac-intro">
@@ -1272,4 +1641,202 @@ button:disabled {
   margin-top: 6px;
 }
 .selected-pending { color: #f8d66d; font-weight: 700; margin-top: 8px }
+
+.planned-badge {
+  font-size: 12px;
+  color: #5ee4a8;
+  margin-top: 4px;
+  padding: 2px 6px;
+  background: rgba(94, 228, 168, 0.1);
+  border-radius: 4px;
+  display: inline-block;
+}
+
+/* Pet Game Styles */
+.pet-root {
+  padding: 20px 24px 48px;
+  max-width: 1200px;
+}
+
+.pet-intro h2 {
+  margin: 0 0 8px;
+  font-size: 20px;
+}
+
+.pet-h3 {
+  margin: 20px 0 12px;
+  font-size: 16px;
+  color: #9a9a9a;
+}
+
+.pet-shop-form {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+
+.pets-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+  gap: 16px;
+}
+
+.pet-card {
+  background: #161616;
+  border: 1px solid #3a3a3a;
+  border-radius: 12px;
+  padding: 16px;
+  transition: border-color 0.2s ease;
+}
+
+.pet-card:hover {
+  border-color: #5ee4a8;
+}
+
+.pet-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.pet-emoji {
+  font-size: 48px;
+  line-height: 1;
+}
+
+.pet-info {
+  flex: 1;
+}
+
+.pet-name {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.pet-level {
+  color: #f8d66d;
+  font-size: 14px;
+}
+
+.pet-status {
+  font-size: 13px;
+  color: #9adcc4;
+}
+
+.pet-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.stat-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.stat-label {
+  width: 60px;
+  color: #aaa;
+}
+
+.stat-bar {
+  flex: 1;
+  height: 10px;
+  background: #0a0a0a;
+  border: 1px solid #333;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.stat-fill {
+  height: 100%;
+  transition: width 0.3s ease;
+}
+
+.stat-fill.happiness {
+  background: linear-gradient(90deg, #ff6b9d, #ffa07a);
+}
+
+.stat-fill.hunger {
+  background: linear-gradient(90deg, #ffa500, #ffd700);
+}
+
+.stat-fill.energy {
+  background: linear-gradient(90deg, #00bfff, #87ceeb);
+}
+
+.stat-fill.exp {
+  background: linear-gradient(90deg, #9370db, #ba55d3);
+}
+
+.stat-value {
+  width: 70px;
+  text-align: right;
+  color: #ccc;
+}
+
+.pet-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pet-actions button {
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+.btn-danger {
+  background: #3a1a1a !important;
+  border-color: #ff6b6b !important;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #4a2a2a !important;
+}
+
+/* Planned time styles */
+.planned-time {
+  margin: 10px 0;
+  padding: 10px;
+  background: #1a2a1a;
+  border: 1px solid #5ee4a8;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.planned-time .countdown {
+  color: #f8d66d;
+  font-weight: 700;
+  margin-top: 4px;
+}
+
+.plan-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 10px 0;
+}
+
+.plan-form input[type="number"] {
+  max-width: 120px;
+}
+
+.finish-warning {
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: rgba(255, 193, 7, 0.1);
+  border: 1px solid #ffc107;
+  border-radius: 4px;
+  color: #ffc107;
+  font-size: 13px;
+  text-align: center;
+}
 </style>

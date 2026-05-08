@@ -54,6 +54,16 @@ public class TaskController {
         return taskService.resumeTask(id);
     }
 
+    @PostMapping("/task/{id}/plan")
+    public TaskResponse setPlannedTime(@PathVariable Long id, @RequestParam int minutes) {
+        return taskService.setPlannedTime(id, minutes);
+    }
+
+    @PostMapping("/task/{id}/check-auto-pause")
+    public TaskResponse checkAutoPause(@PathVariable Long id) {
+        return taskService.checkAndAutoPause(id);
+    }
+
     @PostMapping("/task/{id}/finish")
     public TaskResponse finishTask(@PathVariable Long id) {
         return taskService.finishTask(id);
@@ -63,6 +73,25 @@ public class TaskController {
     @PostMapping("/task/{id}/tick")
     public TaskResponse tick(@PathVariable Long id, @RequestParam(defaultValue = "0") int gold, @RequestParam(defaultValue = "0") int diamonds) {
         return taskService.accumulateTick(id, gold, diamonds);
+    }
+
+    // Add pending rewards for 10-minute cycle
+    @PostMapping("/task/{id}/add-pending")
+    public TaskResponse addPendingReward(@PathVariable Long id, @RequestParam(defaultValue = "0") int gold, @RequestParam(defaultValue = "0") int diamonds) {
+        return taskService.addPendingReward(id, gold, diamonds);
+    }
+
+    // Claim pending rewards manually
+    @PostMapping("/task/{id}/claim")
+    public TaskResponse claimRewards(@PathVariable Long id) {
+        return taskService.claimRewards(id);
+    }
+
+    // Delete task (only if not running)
+    @PostMapping("/task/{id}/delete")
+    public Map<String, String> deleteTask(@PathVariable Long id) {
+        taskService.deleteTask(id);
+        return Map.of("message", "任务已删除");
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

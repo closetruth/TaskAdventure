@@ -2,8 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/GamifiedTask.iml" filepath="$PROJECT_DIR$/GamifiedTask.iml" />
-      <module fileurl="file://$PROJECT_DIR$/backend/backend.iml" filepath="$PROJECT_DIR$/backend/backend.iml" />
+      <module fileurl="file://$PROJECT_DIR$/TaskAdventure.iml" filepath="$PROJECT_DIR$/TaskAdventure.iml" />
     </modules>
   </component>
 </project>

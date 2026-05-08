@@ -49,6 +49,17 @@ public class TaskEntity {
     @Column
     private Integer accumulatedDiamonds;
 
+    // Pending rewards that need to be claimed manually (10-minute cycle rewards)
+    @Column
+    private int pendingGold;
+
+    @Column
+    private int pendingDiamonds;
+
+    // Planned duration in minutes (for auto-pause and bonus calculation)
+    @Column
+    private Integer plannedMinutes;
+
     protected TaskEntity() {
     }
 
@@ -61,6 +72,9 @@ public class TaskEntity {
         this.finishDiamondAwarded = 0;
         this.accumulatedGold = 0;
         this.accumulatedDiamonds = 0;
+        this.pendingGold = 0;
+        this.pendingDiamonds = 0;
+        this.plannedMinutes = null;
     }
 
     public Long getId() {
@@ -99,6 +113,31 @@ public class TaskEntity {
         return accumulatedDiamonds == null ? 0 : accumulatedDiamonds;
     }
 
+    public int getPendingGold() {
+        return pendingGold;
+    }
+
+    public int getPendingDiamonds() {
+        return pendingDiamonds;
+    }
+
+    public Integer getPlannedMinutes() {
+        return plannedMinutes;
+    }
+
+    public void setPlannedMinutes(Integer plannedMinutes) {
+        this.plannedMinutes = plannedMinutes;
+    }
+
+    public boolean shouldAutoPause() {
+        if (plannedMinutes == null || plannedMinutes <= 0) {
+            return false;
+        }
+        long currentElapsed = getCurrentElapsedSeconds();
+        long plannedSeconds = plannedMinutes * 60L;
+        return currentElapsed >= plannedSeconds;
+    }
+
     public void addAccumulated(int gold, int diamonds) {
         if (gold > 0) {
             if (this.accumulatedGold == null) this.accumulatedGold = 0;
@@ -113,6 +152,20 @@ public class TaskEntity {
     public void clearAccumulated() {
         this.accumulatedGold = 0;
         this.accumulatedDiamonds = 0;
+    }
+
+    public void addPendingRewards(int gold, int diamonds) {
+        if (gold > 0) {
+            this.pendingGold += gold;
+        }
+        if (diamonds > 0) {
+            this.pendingDiamonds += diamonds;
+        }
+    }
+
+    public void claimPendingRewards() {
+        this.pendingGold = 0;
+        this.pendingDiamonds = 0;
     }
 
     public void start() {
